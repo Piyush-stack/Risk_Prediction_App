@@ -1,0 +1,1261 @@
+# Interim Submission - Capstone
+
+!pip install textacy
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import textacy
+import spacy
+
+from keras.layers import Dropout, Dense, Embedding, LSTM, Bidirectional
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.models import Sequential
+from sklearn.metrics import matthews_corrcoef, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn import metrics
+from sklearn.utils import shuffle
+import numpy as np
+import pickle
+import warnings
+import logging
+logging.basicConfig(level=logging.INFO)
+from keras.constraints import unit_norm
+from tensorflow.keras.optimizers import SGD
+
+print(spacy.__version__)
+
+## Load English models
+!python -m spacy download en_core_web_sm
+nlp = spacy.load("en_core_web_sm")
+
+!unzip archive.zip -d data
+
+## 1. Import Dataset
+
+data = pd.read_csv("data/IHMStefanini_industrial_safety_and_health_database_with_accidents_description.csv")
+
+d2['Description'][13]
+
+The worker Yaranga while working with barretilla in Stop 996, Level 3300. While unloading metal mesh, on the basket of an ampoloader with his operator Juan barretilla is embedded on safety boot, reacting immediately the worker removing the limb with force and managing to release the foot, but producing a wound on the right foot. In moments that the operator of the Jumbo 2, tried energize your equipment to proceed to the installation of 4 split set at intersection 544 of Nv 3300, remove the lock and opening the electric board of 440V and 400A, and when lifting the thermomagnetic key This makes phase to ground - phase contact with the panel shell - producing a flash which reaches the operator causing the injury described.
+
+data.loc[data['Accident Level'] == 3]
+
+data.head()
+
+data.shape
+
+## 2. Pre-Process Dataset
+
+### 2.1 Rename columns suitably
+
+data.drop("Unnamed: 0", axis=1, inplace=True)
+
+data.rename(columns = {'Data':'Date'}, inplace = True)
+
+data.rename(columns={'Genre':'Gender'}, inplace=True)
+
+data.rename(columns={'Employee or Third Party':'Employee_Third_Party'}, inplace=True)
+
+cols = data.columns
+print(cols)
+
+### 2.2 Check for null values
+
+#Check for null values
+pd.DataFrame(data.isnull().sum(), columns=['No. of missing values'])
+
+### 2.3 Check for duplicates
+
+print(f"There are {data.duplicated().sum()} duplicate rows")
+
+data.drop_duplicates(inplace=True)
+
+data.shape
+
+
+
+### 2.4 Reformat dates to month, week for more insights
+
+data['Date'] = pd.to_datetime(data['Date'])
+
+data['Month'] = data.Date.apply(lambda x : x.month)
+data['Day'] = data.Date.apply(lambda x : x.day)
+data['Weekday'] = data.Date.apply(lambda x : x.day_name())
+data['WeekofYear'] = data.Date.apply(lambda x : x.weekofyear)
+data['Year'] = data.Date.apply(lambda x:x.year)
+
+data.head()
+
+## 3. Explore Dataset
+
+### 3.1 Get unique values and frequency in all categorical columns
+
+for col in data.columns:
+  if not col in ['Unnamed: 0','Date','Description']:
+    print(col)
+    print("."*40)
+    print(data[col].unique())
+    print(data[col].value_counts())
+    print("\n")
+
+def assign_seasons(month):
+    if month in [9,10,11]:
+        season = 'Spring'
+    elif month in [1,2,12]:
+        season = 'Summer'
+    elif month in [3,4,5]:
+        season = 'Autumn'
+    elif month in[6,7,8]:
+        season = 'Winter'
+    return season
+
+data['Season'] = data['Month'].apply(assign_seasons)
+data.head()
+
+### 3.2 Univariate analysis
+
+#### a) Explore distribution and co-relation between accident and location
+
+fig,ax = plt.subplots(nrows=1,ncols=2,figsize=(20,5))
+data['Countries'].value_counts().plot(kind = 'pie', autopct = '%.0f%%', labels = data['Countries'].unique(), figsize = (10, 6),ax=ax[0]);
+data['Local'].value_counts().plot(kind = 'barh',  figsize = (15, 6),ax=ax[1]);
+plt.show()
+
+#### b) Explore distribution and possible co-relation between accidents and date
+
+fig,axs = plt.subplots(2,2)
+data['Month'].value_counts().plot(kind = 'pie', autopct = '%.0f%%', labels = data['Month'].unique(), figsize = (10, 6),ax=axs[0,1], title="Acc% by Month");
+data['Weekday'].value_counts().plot(kind = 'pie', autopct = '%.0f%%', labels = data['Weekday'].unique(), figsize = (10, 6),ax=axs[0,0], title="Acc% by day of week");
+data['WeekofYear'].value_counts(bins=5).plot(kind = 'bar',  figsize = (15, 6),ax=axs[1,0], title="Acc distrib by week of year. We can see a gradual decline in line with monthly decline of accidents");
+data['Day'].value_counts().sort_index(ascending=True).plot(kind = 'bar',  figsize = (15, 6),ax=axs[1,1], title="Accident count by day of the month");
+plt.show()
+
+**Inferences from above two plots**
+
+- We see a difference of 8% in accidents between Monday and Friday. This could be due to accidents caused due to workers hurrying to finish the job for the weekend.
+- The accidents are most in the first *four* months and gradually decreases to half by July. By December, the number of accidents have fallen to 3% as compared to 15% in January (Evidenced also by week of year distribution)
+- If we consider the sudden spike of accidents on the 4th and 8th day of the month as outliers, we can see a curve building-up to a peak mid-month before gradually receding.
+
+
+***Explore reasoning behind country_01 having highest accidents (seen earlier)***
+
+sns.countplot(x="Countries", data=data,hue="Industry Sector");
+
+#Exclude string cols from dataframe to analyse for unique conts and freq
+cols = list(set(data.columns.tolist())-set(['Date','Description']))
+print(cols)
+
+data[cols].describe(exclude=[np.number]).T
+
+***Inference***
+
+Country_01 has the highest number of mining industry and 'Mining' contributes to nearly 50% of the accidents in the dataset. This could be the reason for the higher distribution of accidents in that country.
+
+#### Other inferences on the dataset's distribution
+
+- Accident Level I is the highest kind of accident accounting for 309 out of the 418 rows (73%)
+- Male being the highest affected workers accounting for 396 out of 418 incidents. This is due to the nature of the industry sectors considered here being male dominated.
+- More than 50% of the critical risk is categories as Others. Hence, a single point of failure is not evident.
+
+#### c) Causality between time of the year and accidents
+
+Eg: Winter months may lead to freezing of pipelines or stuck lines.Summer could lead to heat-strokes, rain could lead to flooding of mines, slipping etc...
+
+#Observe count of all accident types by Month
+monthly_trend = data.pivot_table(index='Month', columns=[ 'Year','Accident Level'], aggfunc='count')['Date']
+monthly_trend.replace(np.nan,0,inplace=True)
+#monthly accident counts pivot
+monthly_trend.style.background_gradient()
+
+ax = data['Season'].value_counts().plot(kind = 'bar', figsize = (10, 6))
+
+for p in ax.patches:
+    ax.annotate('{:.2f}'.format(p.get_height()), (p.get_x()+0.15, p.get_height()+0.04))
+plt.show()
+
+### 3.3 Bivariate Analysis
+
+data.columns
+
+i = 0
+columns = ['Gender','Countries','Employee_Third_Party','Industry Sector','Season','Month'] 
+fig,axs = plt.subplots(6,1,figsize=(10,25))
+fig.tight_layout(pad=8.0)
+plt.xticks(rotation = 90)
+for col in columns:
+    labels = data[col].value_counts().index
+    axs[i] = sns.countplot(x = col, data = data, ax = axs[i], orient = 'v',
+                  hue = 'Accident Level').set_title(col.capitalize() +' count plot by Accident Level',fontsize=12)
+    
+    i = i+1
+    
+plt.show()
+
+***Inferences***
+
+Bivariate plots of columns 'Gender','Country','Employee_Third_Party','Industry_sector','Season','Month' w.r.t. Accident level shows that:
+
+- Male has more number of accidents in accident level I.
+- All countries have more accidents in Level I.
+- All type of employess have accident level I as higher count.
+- In all industry sectors,seasons and months accident level I as higher count.
+
+critical_risk_pivot=data.pivot_table(index='Critical Risk', columns='Accident Level', aggfunc='count')['Month']
+critical_risk_pivot.replace(np.nan, 0, inplace=True)
+critical_risk_pivot['total']=critical_risk_pivot.sum(axis=1)
+
+critical_risk_pivot.style.background_gradient()
+
+***Inference***
+
+All accident levels have highest occurance under 'Others' critical risk category.
+
+**Critical risks having atleast 10 occurences are**
+
+    Bees, Projection, Chemical Substracnes, Pressed, Manual Tools, Cut, Venomous Animals
+
+freq_matrix = pd.crosstab(data['Potential Accident Level'], data['Accident Level'])
+fig, ax = plt.subplots(figsize=(6,6))
+ax = sns.heatmap(freq_matrix, ax=ax, annot=True)
+
+***Inferences***
+
+Frequency is high for Accident Level 1 and Potential Accident Level 1,2,3,4
+
+### 3.4 Multi-variate Analysis
+
+order={'I':1, 'II':2, 'III':3, 'IV':4, 'V':5}
+grid = sns.FacetGrid(data, col = 'Industry Sector', hue='Countries', legend_out=True)
+axis = grid.map(sns.countplot, 'Accident Level', order=order)
+plt.legend(loc=1);
+
+### 3.5 Analysis of Description
+
+For the purposes of chat interface, description would be the main input from the user to assess risk.
+
+Other, inputs can either be automatically retrieved such as date or asked from the user
+
+Thus it is important to analyse the characteristics of the description
+
+data['Description'].str.len().hist();
+
+The majority length of the description falls between 200 to 400 words.
+
+descriptions = "";
+for d in data['Description']:
+  descriptions = descriptions + d.lower()
+
+# Get min and max length of descriptions
+data['Length'] = data['Description'].str.len()
+
+print('Minimum line length: {}'.format(data['Length'].min()))
+print('Maximum line length: {}'.format(data['Length'].max()))
+
+# 4. NLP Pre-processing on Descriptions
+
+!pip install contractions
+import nltk
+import inflect
+import contractions
+from bs4 import BeautifulSoup
+import re, string, unicodedata
+from nltk import word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import LancasterStemmer, WordNetLemmatizer
+from sklearn.preprocessing import LabelEncoder
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+
+# Pipeline for text cleaning
+
+def denoise_text(text):
+    # Strip html if any. For ex. removing <html>, <p> tags
+    soup = BeautifulSoup(text, "html.parser")
+    text = soup.get_text()
+    # Replace contractions in the text. For ex. didn't -> did not
+    text = contractions.fix(text)
+    return text
+
+def tokenize(text):
+    return nltk.word_tokenize(text)
+
+def remove_non_ascii(words):
+    """Remove non-ASCII characters from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = unicodedata.normalize('NFKD', word).encode('ascii', 'ignore').decode('utf-8', 'ignore')
+        new_words.append(new_word)
+    return new_words
+def to_lowercase(words):
+    """Convert all characters to lowercase from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = word.lower()
+        new_words.append(new_word)
+    return new_words
+def remove_punctuation(words):
+    """Remove punctuation from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = re.sub(r'[^\w\s]', '', word)
+        if new_word != '':
+            new_words.append(new_word)
+    return new_words
+def replace_numbers(words):
+    """Replace all integer occurrences in list of tokenized words with textual representation"""
+    p = inflect.engine()
+    new_words = []
+    for word in words:
+        if word.isdigit():
+            new_word = p.number_to_words(word)
+            new_words.append(new_word)
+        else:
+            new_words.append(word)
+    return new_words
+def remove_numbers(words):
+    """Remove all integer occurrences in list of tokenized words with textual representation"""
+    new_words = []
+    for word in words:
+        if word.isdigit():
+            new_word = ''
+            new_words.append(new_word)
+        else:
+            new_words.append(word)
+    return new_words
+def remove_stopwords(words):
+    """Remove stop words from list of tokenized words"""
+    new_words = []
+    for word in words:
+        if word not in stopwords.words('english'):
+            new_words.append(word)
+    return new_words
+def stem_words(words):
+    """Stem words in list of tokenized words"""
+    stemmer = LancasterStemmer()
+    stems = []
+    for word in words:
+        stem = stemmer.stem(word)
+        stems.append(stem)
+    return stems
+
+def lemmatize_verbs(words):
+    """Lemmatize verbs in list of tokenized words"""
+    lemmatizer = WordNetLemmatizer()
+    lemmas = []
+    for word in words:
+        lemma = lemmatizer.lemmatize(word, pos='v')
+        lemmas.append(lemma)
+    return lemmas
+
+
+### 4.1 Normalize Description and Critical Risk Columns
+
+By removing stopwords, convert to lowercase, remove-non-ascii words, replace numbers, remove punctuations.
+
+def normalize_text(words):
+    words = remove_non_ascii(words)
+    words = to_lowercase(words)
+    words = remove_punctuation(words)
+    words = remove_numbers(words)
+    words = remove_stopwords(words)
+    #words = stem_words(words)
+    #words = lemmetize_verbs(words)
+    return words
+
+def text_clean(text):
+    text = denoise_text(text)
+    text = ' '.join([x for x in normalize_text(tokenize(text))])
+    return text
+data['Description'] = [text_clean(x) for x in data['Description']]
+
+def text_clean(text):
+    text = denoise_text(text)
+    text = ' '.join([x for x in normalize_text(tokenize(text))])
+    return text
+data['Critical Risk'] = [text_clean(x) for x in data['Critical Risk']]
+
+### 4.2 Create Word-cloud of causes(action verbs) and nouns
+
+# Concat all the oocurences of the descriptions
+descriptions = "";
+for d in data['Description']:
+  descriptions = descriptions + d
+
+#use only the tokenizer and tagger in Spacy's nlp pipeline
+nlp = spacy.load("en_core_web_sm", disable=['parser', 'attribute_ruler', 'lemmatizer', 'ner'])
+
+# Apply Spacy's nlp pipline to get pos tag
+descp = nlp(descriptions) #Apply spacy nlp pipeline
+
+# get a list of nouns and verbs
+nouns = []; verbs=[];
+for w in descp:
+  if w.tag_ == 'NN':   #get the nouns
+    nouns.append(w)
+  elif w.tag_ == 'VB':  # get the action words(verbs)
+    verbs.append(w)
+
+print(len(verbs))
+print(len(nouns))
+
+Generate word clouds to know the frequent occurring words among verbs, nouns. 
+
+(To avoid clutter of stop-words, we are using a pre-processed text of descriptions)
+
+from wordcloud import WordCloud
+wordcloud = WordCloud(
+        background_color='white',
+        max_words=100,
+        max_font_size=30, 
+        scale=3,
+        random_state=1)
+    
+verbsCloud=wordcloud.generate(str(verbs))
+fig = plt.figure(1, figsize=(12, 12))
+plt.axis('off')
+
+plt.imshow(verbsCloud)
+plt.show()
+
+nounsCloud=wordcloud.generate(str(nouns))
+fig = plt.figure(1, figsize=(12, 12))
+plt.axis('off')
+
+plt.imshow(nounsCloud)
+plt.show()
+
+**Inference**
+
+We see that the top causes are
+
+`Removal, Fork-lift, Fall, Bite, reach, take etc`
+
+The possible victims are 
+
+`Operator, Assistant, Employee, Collaborator, Worker, Mechanic`
+
+Most bodly-injuries happen to
+
+`Hand, Finger, Neck, face`
+
+Most accident-prone equipment/area are
+
+`Truck, Drill, Pump, Ladder, Platform, Tube, Pipe, Mesh`
+
+### 4.3 N-Grams Analysis
+
+def top_ngrams (data, num):
+  wc  = nltk.FreqDist(nltk.ngrams(data, num)).most_common(20) # taking top 20 most common words
+  wc = pd.DataFrame(wc, columns=['Words', 'Count'])
+  wc.Words = [' '.join(i) for i in wc.Words]
+  wc.set_index('Words', inplace=True)       # setting the Words as index
+  # Return dataframe containing unique tokens ordered by their counts 
+  return wc
+
+def get_words(spacy_doc):
+  words =[]
+  for t in spacy_doc:
+    if len(t.text) > 3:
+      words.append(t.text)
+  return words
+
+descp_tokens = get_words(descp)
+
+uni_grams = top_ngrams(descp_tokens, 1)
+
+# Words and counts
+#uni_grams[0:20]
+
+uni_grams.sort_values(by='Count').plot.barh(figsize = (10,5));
+
+bi_grams = top_ngrams(descp_tokens, 2)
+bi_grams.sort_values(by='Count').plot.barh(figsize = (10,5));
+# Words and counts
+#bi_grams[0:20]
+
+tri_grams = top_ngrams(descp_tokens, 3)
+tri_grams.sort_values(by='Count').plot.barh(figsize = (10,5));
+# Words and counts
+#tri_grams[0:20]
+
+# 5. Prepare data for model
+
+## 5.1 Combine Description and Critical Risk columns
+
+data['Desc'] = data['Description']+data['Critical Risk']
+
+!pip install contractions
+import nltk
+import inflect
+import contractions
+from bs4 import BeautifulSoup
+import re, string, unicodedata
+from nltk import word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import LancasterStemmer, WordNetLemmatizer
+from sklearn.preprocessing import LabelEncoder
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+
+def denoise_text(text):
+    # Strip html if any. For ex. removing <html>, <p> tags
+    soup = BeautifulSoup(text, "html.parser")
+    text = soup.get_text()
+    # Replace contractions in the text. For ex. didn't -> did not
+    text = contractions.fix(text)
+    return text
+
+def tokenize(text):
+    return nltk.word_tokenize(text)
+
+def remove_non_ascii(words):
+    """Remove non-ASCII characters from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = unicodedata.normalize('NFKD', word).encode('ascii', 'ignore').decode('utf-8', 'ignore')
+        new_words.append(new_word)
+    return new_words
+def to_lowercase(words):
+    """Convert all characters to lowercase from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = word.lower()
+        new_words.append(new_word)
+    return new_words
+def remove_punctuation(words):
+    """Remove punctuation from list of tokenized words"""
+    new_words = []
+    for word in words:
+        new_word = re.sub(r'[^\w\s]', '', word)
+        if new_word != '':
+            new_words.append(new_word)
+    return new_words
+def replace_numbers(words):
+    """Replace all interger occurrences in list of tokenized words with textual representation"""
+    p = inflect.engine()
+    new_words = []
+    for word in words:
+        if word.isdigit():
+            new_word = p.number_to_words(word)
+            new_words.append(new_word)
+        else:
+            new_words.append(word)
+    return new_words
+def remove_numbers(words):
+    """Replace all interger occurrences in list of tokenized words with textual representation"""
+    p = inflect.engine()
+    new_words = []
+    for word in words:
+        if word.isdigit():
+            new_word = ''
+            new_words.append(new_word)
+        else:
+            new_words.append(word)
+    return new_words
+def remove_stopwords(words):
+    """Remove stop words from list of tokenized words"""
+    new_words = []
+    for word in words:
+        if word not in stopwords.words('english'):
+            new_words.append(word)
+    return new_words
+def stem_words(words):
+    """Stem words in list of tokenized words"""
+    stemmer = LancasterStemmer()
+    stems = []
+    for word in words:
+        stem = stemmer.stem(word)
+        stems.append(stem)
+    return stems
+
+
+
+def normalize_text(words):
+    words = remove_non_ascii(words)
+    words = to_lowercase(words)
+    words = remove_punctuation(words)
+    words = remove_numbers(words)
+    words = remove_stopwords(words)
+    #words = stem_words(words)
+    #words = lemmetize_verbs(words)
+    return words
+
+def text_prepare(text):
+    text = denoise_text(text)
+    text = ' '.join([x for x in normalize_text(tokenize(text))])
+    return text
+data['Desc'] = [text_prepare(x) for x in data['Desc']]
+le = LabelEncoder()
+data['Accident Level'] = le.fit_transform(data['Accident Level'])
+
+data.reset_index(drop=True, inplace=True)
+
+## 5.2 Balance the data and save the cleaned, balanced text data to CSV
+
+X = data[['Desc']]
+y = data['Accident Level']
+
+data['Desc'][4]
+
+data.loc[data['Accident Level'] == 2]
+
+from imblearn.over_sampling import SMOTEN
+over = SMOTEN(random_state=0)
+X_text_b, y_text_b = over.fit_resample(X, y)
+
+y_text_b.value_counts()
+
+concatenated_data = pd.concat([X_text_b, y_text_b], axis=1)
+
+concatenated_data.head()
+
+concatenated_data.to_csv('cleaned_text_data.csv') 
+
+## 5.3 Convert text to vectors, balance data and save to file
+
+import imblearn
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+from imblearn.under_sampling import RandomUnderSampler
+from imblearn.pipeline import Pipeline
+
+X = data['Desc']
+
+from sklearn.feature_extraction.text import CountVectorizer
+
+vectorizer = CountVectorizer()
+vectorizer.fit(X)
+X_count_vect=vectorizer.transform(X)
+
+pickle.dump(vectorizer, open("vector.pkl", "wb"))
+
+X_count_vect
+
+over = SMOTE()
+X_sm, y_sm = over.fit_resample(X_count_vect, y)
+
+X_sm.toarray()
+X_sm.shape
+
+y_sm_one_hot = pd.get_dummies(y_sm)
+
+df_x = pd.DataFrame(X_sm.todense(), columns = vectorizer.get_feature_names())
+df_final = pd.concat([df_x,y_sm], axis=1)
+
+df_final.shape
+
+df_final.to_csv("vectorized_data.csv")
+
+## 5.4 Function to create a Glove embedding layer and prepare text sequences for tensorflow NN models
+
+!wget http://nlp.stanford.edu/data/glove.6B.zip
+!unzip glove*.zip
+
+def prepare_model_input(X_train, X_test,MAX_NB_WORDS=75000,MAX_SEQUENCE_LENGTH=500):
+    np.random.seed(7)
+    text = np.concatenate((X_train, X_test), axis=0)
+    text = np.array(text)
+    tokenizer = Tokenizer(num_words=MAX_NB_WORDS)
+    tokenizer.fit_on_texts(text)
+    #dump tokenizer model for prediction later
+    pickle.dump(tokenizer, open('text_tokenizer.pkl', 'wb'))
+    sequences = tokenizer.texts_to_sequences(text)
+    word_index = tokenizer.word_index
+    text = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH)
+    print('Found %s unique tokens.' % len(word_index))
+    indices = np.arange(text.shape[0])
+    # np.random.shuffle(indices)
+    text = text[indices]
+    print(text.shape)
+    X_train_Glove = text[0:len(X_train), ]
+    X_test_Glove = text[len(X_train):, ]
+    embeddings_dict = {}
+    f = open("glove.6B.50d.txt", encoding="utf8")
+    for line in f:
+        values = line.split()
+        word = values[0]
+        try:
+            coefs = np.asarray(values[1:], dtype='float32')
+        except:
+            pass
+        embeddings_dict[word] = coefs
+    f.close()
+    print('Total %s word vectors.' % len(embeddings_dict))
+    return (X_train_Glove, X_test_Glove, word_index, embeddings_dict)
+
+## Helper methods for evaluation
+def get_eval_report(labels, preds):
+    mcc = matthews_corrcoef(labels, preds)
+    cm = confusion_matrix(labels, preds)
+    
+    return {
+        "mcc": mcc,
+        "cm":cm
+    }
+def compute_metrics(labels, preds):
+    assert len(preds) == len(labels)
+    return get_eval_report(labels, preds)
+
+def plot_graphs(history, string):
+  plt.plot(history.history[string])
+  plt.plot(history.history['val_'+string], '')
+  plt.xlabel("Epochs")
+  plt.ylabel(string)
+  plt.legend([string, 'val_'+string])
+  plt.show()
+
+# 6. Apply ML Models
+
+## 6.1 Apply Statistical ML Models
+
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, recall_score, f1_score, confusion_matrix, roc_curve, classification_report
+from sklearn.model_selection import GridSearchCV
+from sklearn.tree     import DecisionTreeClassifier
+from sklearn.ensemble import BaggingClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.ensemble import GradientBoostingClassifier
+from xgboost import XGBClassifier
+
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+
+### Read and setup data
+
+data = pd.read_csv('vectorized_data.csv')
+
+data.head()
+
+data.drop('Unnamed: 0', axis=1, inplace=True)
+
+data
+
+X = data.drop(['Accident Level'],axis = 1)
+y = data['Accident Level']
+y_1h = pd.get_dummies(y)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.3, random_state=1)
+
+### a1. Apply Logistic Regression 
+
+logreg = LogisticRegression(solver = 'lbfgs')
+
+logreg.fit(X_train, y_train)
+
+y_pred_lr1 = logreg.predict(X_test)
+logreg.score(X_train, y_train)
+print('accuracy %s' % accuracy_score(y_pred_lr1, y_test))
+print(classification_report(y_test, y_pred_lr1))
+
+### a2. Logistic Regression with Liblinear
+
+logreg = LogisticRegression(solver = 'liblinear')
+
+logreg.fit(X_train, y_train)
+
+y_pred_lr2 = logreg.predict(X_test)
+logreg.score(X_train, y_train)
+print('accuracy %s' % accuracy_score(y_pred_lr2, y_test))
+print(classification_report(y_test, y_pred_lr2))
+
+### b. KNN Model
+
+knn = KNeighborsClassifier(n_neighbors = 3)
+
+knn.fit(X_train, y_train)
+
+y_pred_knn = knn.predict(X_test)
+knn.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_knn))
+print(classification_report(y_test, y_pred_knn))
+
+### c. Gaussian Naive Bayes
+
+nb = GaussianNB()
+
+nb.fit(X_train, y_train)
+
+y_pred_nb = knn.predict(X_test)
+nb.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_nb))
+print(classification_report(y_test, y_pred_nb))
+
+### d. SVM
+In its most basic type, SVM doesn't support multiclass classification. For multiclass classification, the same principle is utilized after breaking down the multi-classification problem into smaller subproblems, all of which are binary classification problems
+
+
+svm = SVC(gamma=0.1, C=3)
+
+svm.fit(X_train , y_train)
+
+y_pred_svm = svm.predict(X_test)
+svm.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_svm))
+print(classification_report(y_test, y_pred_svm))
+
+### e. Decision Tree
+
+dt = DecisionTreeClassifier(criterion='entropy', random_state = 1)
+dt.fit(X_train, y_train)
+dt.score(X_train, y_train)
+dt.score(X_test, y_test)
+
+If we allow the tree to grow to max extent, there will always be overfitting in the model due to which the test accuracy drops drastically.
+Hence, we'll Regularize/prune the decision tree by limiting the max. depth of trees.
+
+### f. Regularized / Pruned Decision Tree
+
+tree_param = {'criterion':['gini','entropy'],'max_depth':[4,5,6,7,8,9,10,11,12,15,20,30,40,50,70,90,120,150]}
+
+dt_gs = GridSearchCV(DecisionTreeClassifier(), tree_param, cv=5)
+dt_gs.fit(X_train, y_train)
+# print best parameter after tuning
+print(dt_gs.best_params_)
+ 
+# print how our model looks after hyper-parameter tuning
+print(dt_gs.best_estimator_)
+#dt_pruned = DecisionTreeClassifier(criterion='entropy', max_depth = 100, random_state = 1)
+
+dt_pruned = DecisionTreeClassifier(criterion='gini', max_depth = 90, random_state = 1)
+dt_pruned.fit(X_train, y_train)
+
+y_pred_dt_pruned = dt_pruned.predict(X_test)
+dt_pruned.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_dt_pruned))
+print(classification_report(y_test, y_pred_dt_pruned))
+
+### g. Random Forest
+
+rf = RandomForestClassifier()       #n_estimators = 50, max_depth =5, random_state=1)
+rf = rf.fit(X_train, y_train)
+
+y_pred_rf = rf.predict(X_test)
+
+pickle.dump(rf, open('randomForestModel.pkl', 'wb'))
+
+rf.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_rf))
+print(classification_report(y_test, y_pred_rf))
+
+from scipy.stats import randint as sp_randint
+
+param_dist = {"n_estimators": [10,50,100,150,200],
+              "max_features": sp_randint(1, 11),
+              "min_samples_split": sp_randint(1, 11),
+              "min_samples_leaf": sp_randint(1, 11),
+              "criterion": ["gini", "entropy"]}
+
+# run randomized search
+n_iter_search = 20
+random_search = RandomizedSearchCV(rf, param_distributions=param_dist, n_iter=n_iter_search)
+
+rf_rs = random_search.fit(X_train, y_train)
+
+# print best parameter after tuning
+print(rf_rs.best_params_)
+ 
+# print how our model looks after hyper-parameter tuning
+print(rf_rs.best_estimator_)
+
+rf_rs = RandomForestClassifier(criterion= 'gini', max_features=6, min_samples_leaf=1, min_samples_split=6)
+
+rf_rs = rf.fit(X_train, y_train)
+
+y_pred_rf_rs = rf_rs.predict(X_test)
+
+rf_rs.score(X_train, y_train)
+print(accuracy_score(y_test, y_pred_rf_rs))
+print(classification_report(y_test, y_pred_rf_rs))
+
+### h. XGBoost
+
+xgb = XGBClassifier() #n_estimators = 100, learning_rate = 0.1, random_state=1)
+xgb.fit(X_train, y_train)
+pred_xgb = xgb.predict(X_test)
+acc_xgb  = accuracy_score(y_test, pred_xgb)
+print("Train Score:"+str(xgb.score(X_train, y_train)))
+print("Test SCore:"+str(xgb.score(X_test, y_test)))
+
+### i. AdaBoostClassifier
+
+xgb = AdaBoostClassifier() 
+xgb.fit(X_train, y_train)
+pred_xgb = xgb.predict(X_test)
+acc_xgb  = accuracy_score(y_test, pred_xgb)
+print("Train Score:"+str(xgb.score(X_train, y_train)))
+print("Test SCore:"+str(xgb.score(X_test, y_test)))
+
+## 6.2 Apply LSTM with Glove embedding layer
+
+def build_lstm(word_index, embeddings_dict, nclasses,  MAX_SEQUENCE_LENGTH=500, EMBEDDING_DIM=50, dropout=0.5, hidden_layer = 3, lstm_node = 32):
+    # Initialize a sequebtial model
+    model = Sequential()
+    # Make the embedding matrix using the embedding_dict
+    embedding_matrix = np.random.random((len(word_index) + 1, EMBEDDING_DIM))
+    for word, i in word_index.items():
+        embedding_vector = embeddings_dict.get(word)
+        if embedding_vector is not None:
+            # words not found in embedding index will be all-zeros.
+            if len(embedding_matrix[i]) != len(embedding_vector):
+                print("could not broadcast input array from shape", str(len(embedding_matrix[i])),
+                      "into shape", str(len(embedding_vector)), " Please make sure your"
+                                                                " EMBEDDING_DIM is equal to embedding_vector file ,GloVe,")
+                exit(1)
+            embedding_matrix[i] = embedding_vector
+            
+    # Add embedding layer
+    model.add(Embedding(len(word_index) + 1,
+                                EMBEDDING_DIM,
+                                weights=[embedding_matrix],
+                                input_length=MAX_SEQUENCE_LENGTH,
+                                trainable=True))
+    # Add hidden layers 
+    for i in range(0,hidden_layer):
+        # Add a bidirectional lstm layer
+        model.add(LSTM(lstm_node, return_sequences=True, recurrent_dropout=0.2))
+        # Add a dropout layer after each lstm layer
+        model.add(Dropout(dropout))
+    model.add(LSTM(lstm_node, recurrent_dropout=0.2))
+    model.add(Dropout(dropout))
+    # Add the fully connected layer with 256 nurons and relu activation
+    model.add(Dense(256, activation='relu'))
+    # Add the output layer with softmax activation since we have 2 classes
+    model.add(Dense(nclasses, activation='softmax'))
+    # Compile the model using sparse_categorical_crossentropy
+    model.compile(loss='sparse_categorical_crossentropy',
+                      optimizer='adam',
+                      metrics=['accuracy'])
+    return model
+
+X_t = concatenated_data['Desc']
+y_t = concatenated_data['Accident Level']
+
+X_t.head()
+
+print(X_t.shape)
+print(y_t.shape)
+
+### a. Prepare inputs, split data and build model
+
+X_train, X_test, y_train, y_test = train_test_split(X_t, y_t, test_size = 0.2)
+print("Preparing model input ...")
+X_train_Glove, X_test_Glove, word_index, embeddings_dict = prepare_model_input(X_train,X_test)
+print("Done!")
+print("Building Model!")
+model = build_lstm(word_index, embeddings_dict, 5)
+model.summary()
+
+### b. Fit model
+
+history = model.fit(X_train_Glove, y_train,
+                           validation_data=(X_test_Glove,y_test),
+                           epochs=10,
+                           batch_size=128,
+                           verbose=1)
+
+### c. Evaluate model
+
+plot_graphs(history, 'accuracy')
+plot_graphs(history, 'loss')
+
+print("\n Evaluating Model ... \n")
+predicted_x = model.predict(X_test_Glove)
+predicted=np.argmax(predicted_x,axis=1)
+print(metrics.classification_report(y_test, predicted))
+print("\n")
+logger = logging.getLogger("logger")
+result = compute_metrics(y_test, predicted)
+cm_df = pd.DataFrame(result['cm'],index = ['0','1','2','3','4'], 
+                     columns = ['0','1','2','3','4'])
+# Confusion matrix is predicting values outside expected range
+#Plotting the confusion matrix
+plt.figure(figsize=(5,4))
+sns.heatmap(cm_df, annot=True)
+plt.title('Confusion Matrix')
+plt.ylabel('Actual Values')
+plt.xlabel('Predicted Values')
+plt.show()
+
+### d. Save model
+
+!mkdir -p saved_models
+model.save('saved_models/biLSTM')
+
+## 6.3 LSTM 2
+
+data = pd.read_csv('cleaned_text_data.csv')
+data.head()
+
+X = data['Desc']
+y= data['Accident Level']
+
+def build_lstm2(word_index, embeddings_dict, nclasses,  MAX_SEQUENCE_LENGTH=500, EMBEDDING_DIM=50, dropout=0.5, hidden_layer = 3, lstm_node = 32):
+    # Initialize a sequebtial model
+    model = Sequential()
+    # Make the embedding matrix using the embedding_dict
+    embedding_matrix = np.random.random((len(word_index) + 1, EMBEDDING_DIM))
+    for word, i in word_index.items():
+        embedding_vector = embeddings_dict.get(word)
+        if embedding_vector is not None:
+            # words not found in embedding index will be all-zeros.
+            if len(embedding_matrix[i]) != len(embedding_vector):
+                print("could not broadcast input array from shape", str(len(embedding_matrix[i])),
+                      "into shape", str(len(embedding_vector)), " Please make sure your"
+                                                                " EMBEDDING_DIM is equal to embedding_vector file ,GloVe,")
+                exit(1)
+            embedding_matrix[i] = embedding_vector
+            
+    # Add embedding layer
+    model.add(Embedding(len(word_index) + 1,
+                                EMBEDDING_DIM,
+                                weights=[embedding_matrix],
+                                input_length=MAX_SEQUENCE_LENGTH,
+                                trainable=True))
+    model.add(LSTM(32, return_sequences = True, recurrent_dropout=0.2))
+    model.add(Dropout(0.5))
+    model.add(LSTM(16, recurrent_dropout=0.2))
+    model.add(Dropout(0.5))
+    model.add(Dense(5,activation = 'softmax'))
+    model.compile(loss='sparse_categorical_crossentropy',optimizer = 'adam',metrics = ['accuracy'])
+    return model
+
+### a. Build Model
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.2)
+print("Preparing model input ...")
+X_train_Glove, X_test_Glove, word_index, embeddings_dict = prepare_model_input(X_train,X_test)
+print("Done!")
+print("Building Model!")
+lstm2_model = build_lstm2(word_index, embeddings_dict, 5)
+lstm2_model.summary()
+
+### b. Fit Model
+
+from keras.callbacks import EarlyStopping
+es = EarlyStopping(monitor='val_loss', verbose=1, mode='min', patience=15)
+lstm_hist = lstm2_model.fit(X_train_Glove, 
+          y_train, 
+          validation_data=[X_test_Glove, y_test],
+          callbacks = [es],
+          batch_size=16, 
+          epochs=4
+        )
+
+### c. Evaluate
+
+def plot_graphs(history, string):
+    plt.plot(history.history[string])
+    plt.plot(history.history['val_'+string], '')
+    plt.xlabel("Epochs")
+    plt.ylabel(string)
+    plt.legend([string, 'val_'+string])
+    plt.show()
+plot_graphs(lstm_hist, 'accuracy')
+plot_graphs(lstm_hist, 'loss')
+
+from sklearn.metrics import accuracy_score, confusion_matrix,precision_score,classification_report,recall_score
+print("Model Evaluation")
+lstm_predicted = lstm2_model.predict(X_test_Glove)
+lstm_predicted=np.argmax(lstm_predicted,axis=1)
+print(classification_report(y_test, lstm_predicted))
+print("\n")
+lstm_cm = confusion_matrix(y_test, lstm_predicted)
+lstm_accuracy = accuracy_score(y_test, lstm_predicted)
+print("LSTM test Accuracy",lstm_accuracy)
+cm_df = pd.DataFrame(lstm_cm,index = ['0','1','2','3','4'], 
+                     columns = ['0','1','2','3','4'])
+# Confusion matrix is predicting values outside expected range
+#Plotting the confusion matrix
+plt.figure(figsize=(5,4))
+sns.heatmap(cm_df, annot=True)
+plt.title('Confusion Matrix')
+plt.ylabel('Actual Values')
+plt.xlabel('Predicted Values')
+plt.show()
+
+## 6.4 GRU Model
+
+def get_embedding_layer(word_index, embeddings_dict,  MAX_SEQUENCE_LENGTH=500, EMBEDDING_DIM=50):
+  embedding_matrix = np.random.random((len(word_index) + 1, EMBEDDING_DIM))
+  for word, i in word_index.items():
+        embedding_vector = embeddings_dict.get(word)
+        if embedding_vector is not None:
+            # words not found in embedding index will be all-zeros.
+            if len(embedding_matrix[i]) != len(embedding_vector):
+                print("could not broadcast input array from shape", str(len(embedding_matrix[i])),
+                      "into shape", str(len(embedding_vector)), " Please make sure your"
+                                                                " EMBEDDING_DIM is equal to embedding_vector file ,GloVe,")
+                exit(1)
+            embedding_matrix[i] = embedding_vector
+            
+    # Add embedding layer
+  embedding_layer = Embedding(len(word_index) + 1,
+                                EMBEDDING_DIM,
+                                weights=[embedding_matrix],
+                                input_length=MAX_SEQUENCE_LENGTH,
+                                trainable=True)
+  return embedding_layer
+
+from keras.layers import LSTM, SimpleRNN,GlobalMaxPool1D,Dropout,GRU, Bidirectional, Lambda, Flatten,Input, Add,Dense,BatchNormalization
+
+### a. Build Model
+
+gru_model = Sequential()
+gru_model.add(get_embedding_layer(word_index, embeddings_dict))
+gru_model.add(GRU(128, return_sequences=False))
+gru_model.add(Dropout(0.5))
+gru_model.add(Dense(5, activation = 'softmax'))
+gru_model.compile(loss='sparse_categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+print(gru_model.summary())
+
+### b. Fit Model
+
+history = gru_model.fit(X_train_Glove, y_train, 
+                        validation_data=(X_test_Glove, y_test), 
+                        batch_size = 32, epochs = 10)
+
+We will stop training at epoch 4
+
+### c. Evaluate
+
+def plot_graphs(history, string):
+    plt.plot(history.history[string])
+    plt.plot(history.history['val_'+string], '')
+    plt.xlabel("Epochs")
+    plt.ylabel(string)
+    plt.legend([string, 'val_'+string])
+    plt.show()
+plot_graphs(history, 'accuracy')
+plot_graphs(history, 'loss')
+
+print("GRU Model Evaluation")
+gru_predicted = gru_model.predict(X_test_Glove)
+gru_predicted=np.argmax(gru_predicted,axis=1)
+print(classification_report(y_test, gru_predicted))
+print("\n")
+gru_cm = confusion_matrix(y_test, gru_predicted)
+gru_accuracy = accuracy_score(y_test, gru_predicted)
+print("LSTM test Accuracy",gru_accuracy)
+cm_df = pd.DataFrame(gru_cm,index = ['0','1','2','3','4'], 
+                     columns = ['0','1','2','3','4'])
+# Confusion matrix is predicting values outside expected range
+#Plotting the confusion matrix
+plt.figure(figsize=(5,4))
+sns.heatmap(cm_df, annot=True)
+plt.title('Confusion Matrix')
+plt.ylabel('Actual Values')
+plt.xlabel('Predicted Values')
+plt.show()
+
+filename = "gru_model.pkl"
+pickle.dump(gru_model, open(filename, 'wb'))
+
+##6.5 Simple RNN
+
+### a. Build Model
+
+rn_model = Sequential()
+rn_model.add(get_embedding_layer(word_index, embeddings_dict))
+
+# The output of GRU will be a 3D tensor of shape (batch_size, timesteps, 256)
+#rn_model.add(GRU(256, return_sequences=True))
+
+# The output of SimpleRNN will be a 2D tensor of shape (batch_size, 128)
+rn_model.add(SimpleRNN(128))
+
+rn_model.add(Dense(5, activation = 'softmax'))
+
+rn_model.summary()
+
+### b. Fit Model
+
+rn_model.compile(loss='sparse_categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+rn_history = rn_model.fit(X_train_Glove, y_train, 
+                        validation_data=(X_test_Glove, y_test), 
+                        batch_size = 32, epochs = 3)
+
+### c. Evaluate
+
+def plot_graphs(history, string):
+    plt.plot(history.history[string])
+    plt.plot(history.history['val_'+string], '')
+    plt.xlabel("Epochs")
+    plt.ylabel(string)
+    plt.legend([string, 'val_'+string])
+    plt.show()
+plot_graphs(rn_history, 'accuracy')
+plot_graphs(rn_history, 'loss')
+
+print("RNN Model Evaluation")
+rn_predicted = rn_model.predict(X_test_Glove)
+rn_predicted=np.argmax(rn_predicted,axis=1)
+print(classification_report(y_test, rn_predicted))
+print("\n")
+rn_cm = confusion_matrix(y_test, rn_predicted)
+rn_accuracy = accuracy_score(y_test, rn_predicted)
+print("RNN test Accuracy",rn_accuracy)
+cm_df = pd.DataFrame(rn_cm,index = ['0','1','2','3','4'], 
+                     columns = ['0','1','2','3','4'])
+# Confusion matrix is predicting values outside expected range
+#Plotting the confusion matrix
+plt.figure(figsize=(5,4))
+sns.heatmap(cm_df, annot=True)
+plt.title('Confusion Matrix')
+plt.ylabel('Actual Values')
+plt.xlabel('Predicted Values')
+plt.show()
+
+### d. save model
+
+rn_model.save('saved_models/simple_rnn')
+
+!zip -r simple_rnn_model.zip saved_models/simple_rnn
+
+# 7. Prediction function for sequence models
+
+def prepare_text_for_predict(text, tokenizer, MAX_NB_WORDS=75000,MAX_SEQUENCE_LENGTH=500):
+  np.random.seed(7)
+  sequences = tokenizer.texts_to_sequences(text)
+  text = pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH)
+  return text
+
+
+def predict_with_trained_model(model, tokenizer, text):
+  text_seq = prepare_text_for_predict(text,tokenizer)
+  pred = model.predict(text_seq[:1])
+  prediction=np.argmax(pred,axis=1)
+  return prediction
+
+X_test_Glove.shape
+
+with open('text_tokenizer.pkl', 'rb') as handle:
+    loaded_tokenizer = pickle.load(handle)
+
+data['Desc'][0]
+
+i = 25
+prediction = predict_with_trained_model(model, loaded_tokenizer, data['Desc'][i])
+#y = data['Accident Level'][i]
+#print(t, y)
+## why is it coming as [3,3,3,3,3....]  ...something wrong with model?
+#TODO
+## Random testing for predcition is always producing result 3 and output is coming 0 .... Take other values and test
+
+predicted_x = model.predict(X_test_Glove)
+
+#References for using Glove embeddings for accident level prediction:
+https://blog.keras.io/using-pre-trained-word-embeddings-in-a-keras-model.html
+https://machinelearningmastery.com/use-word-embedding-layers-deep-learning-keras/
+
+
+
+#https://github.com/golamSaroar/h2o-autoML/blob/master/h2o-automl.ipynb
